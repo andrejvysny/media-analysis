@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-safe_move.py — v 9.1  (console output only)
+safe_move.py — v 9.3  (console layer + tidy-up)
 
-•  Finished-file summaries scroll up and stay.
-•  Three-line *live block* (Files bar, Current file, Progress, Actions)
-   sticks at the bottom for the whole run.
-•  Descriptions refresh immediately (even for bars whose total=0),
-   so “Current file” and “Actions” are rendered from the start.
-•  Action line now resets correctly for every new file.
-•  Removed the duplicate `log.info(OK …)` line that cluttered the console.
-
-Disk-handling, hashing and journalling code is untouched.
+What’s new in this revision
+────────────────────────────
+• **Empties every directory tree** under the source once all its files have
+  been moved:
+    – After each file is deleted, we try to remove its parent directories
+      bottom-up until we hit the `src_root` or a non-empty dir.
+    – At the very end we also attempt to remove `src_root` itself if it
+      ended up empty.
+• The deletion is **safe**:
+    – Only `os.rmdir()` (fails unless directory is empty).
+    – Never walks above the original `src_root`.
+• All file-moving, hashing, journalling, progress-bar logic is unchanged
+  from v 9.2 (fixed-width bars, sticky live block, etc.).
 """
 
 from __future__ import annotations
@@ -30,7 +34,10 @@ DB, LOGFILE     = "copy_progress.db", "safe_move.log"
 CHUNK           = 1 << 20          # 1 MiB
 TEMP_SFX        = ".part"
 SAFETY_FREE     = 5 << 30          # keep ≥ 5 GiB free
+
 COLS            = _shutil.get_terminal_size(fallback=(120, 20)).columns
+BAR_NCOLS       = min(100, COLS)   # fixed bar width, never wider than terminal
+
 SPIN            = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 ESC_CLEAR       = "\x1b[K"
 LABEL_PAD       = "       "        # 7 spaces – keeps columns aligned
@@ -60,7 +67,6 @@ log = logging.getLogger("safe_move")
 
 # ────────────────  Helpers  ────────────────
 def print_desc(bar: tqdm, text: str):
-    """Set description and *immediately* refresh, even for zero-width bars."""
     bar.set_description(text + ESC_CLEAR, refresh=False)
     bar.refresh()
 
@@ -79,7 +85,7 @@ def sha256sum(p: Path) -> str:
 
 def _with_stem(p: Path, stem: str) -> Path:
     try:
-        return p.with_stem(stem)            # ≥ Py 3.9
+        return p.with_stem(stem)        # ≥ Py 3.9
     except AttributeError:
         return p.with_name(stem + p.suffix)
 
@@ -125,6 +131,19 @@ def fmt_actions(state: str, spinner: str) -> str:
         else:
             parts.append(phase)
     return "Actions:" + LABEL_PAD + "  –  ".join(parts)
+
+def _prune_empty_dirs(start: Path, stop: Path):
+    """
+    Remove empty dirs from *start* up to (but NOT including) *stop*.
+    Stops on first non-empty dir or at filesystem root.
+    """
+    p = start
+    while p != stop and p != p.parent:
+        try:
+            p.rmdir()          # succeeds only if directory is empty
+        except OSError:
+            break              # not empty or other error – stop pruning
+        p = p.parent
 
 # ────────────────  Journal  ────────────────
 class Journal:
@@ -251,8 +270,11 @@ def copy_one(
     src.unlink()
     journal.mark(src, dst, 1)
 
+    # ── tidy empty directories under src_root ─────────────────────
+    _prune_empty_dirs(src.parent, src_root)
+
     print_desc(act, fmt_actions("done", ""))
-    bar.refresh()   # ensure final 100 % visible
+    bar.refresh()           # force final 100 %
 
     duration = monotonic() - overall_start
     tqdm.write(
@@ -261,7 +283,6 @@ def copy_one(
         f"Time: {fmt_secs(duration)}  "
         f"FILE: {dst.name}"
     )
-    # removed duplicate console log line
 
 # ────────────────  Driver  ────────────────
 def drive(src_root: Path, dst_root: Path):
@@ -271,7 +292,7 @@ def drive(src_root: Path, dst_root: Path):
     files_bar = tqdm(
         total=total_files,
         bar_format="Files  {n_fmt}/{total_fmt} |{bar}| {percentage:3.0f} %",
-        ncols=COLS,
+        ncols=BAR_NCOLS,
         position=0,
         leave=True,
     )
@@ -285,7 +306,7 @@ def drive(src_root: Path, dst_root: Path):
             "Progress:" + LABEL_PAD +
             "|{bar}| {percentage:3.0f} %  {n_fmt}/{total_fmt}  {rate_fmt}"
         ),
-        ncols=COLS,
+        ncols=BAR_NCOLS,
         position=2,
         leave=True,
     )
@@ -306,6 +327,12 @@ def drive(src_root: Path, dst_root: Path):
             total_files=total_files,
         )
         files_bar.update(1)
+
+    # attempt to remove src_root itself if empty
+    try:
+        src_root.rmdir()
+    except OSError:
+        pass
 
     files_bar.close()
     info_bar.close()
