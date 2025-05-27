@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-safe_move.py — v 9.4  (console + directory-layout tweak)
+safe_move.py — v 9.5
 
-What's new
-──────────
-* **Root-folder preserved**: when you run
-
-      safe_move.py /example/X  /target
-
-  every file that was under */example/X* is now copied to */target/X/* …  
-  (The *X* directory is created automatically if it doesn't exist.)
-* No other behaviour changes.  Copy / hash / journalling / progress bars all
-  work exactly as in v 9.3.
+•   Keeps the source’s leaf folder (*X*) under the target.
+•   Deletes only those directories that are empty **after** all files are
+    processed – avoids FileNotFoundError during os.walk / rglob.
 """
 
 from __future__ import annotations
@@ -28,22 +21,20 @@ except ImportError:
 
 # ────────────────  Config  ────────────────
 DB, LOGFILE     = "copy_progress.db", "safe_move.log"
-CHUNK           = 1 << 20
+CHUNK           = 1 << 20          # 1 MiB
 TEMP_SFX        = ".part"
 SAFETY_FREE     = 5 << 30          # ≥ 5 GiB free
-
 COLS            = _shutil.get_terminal_size(fallback=(120, 20)).columns
-BAR_NCOLS       = min(100, COLS)   # fixed bar width
-
+BAR_NCOLS       = min(100, COLS)
 SPIN            = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 ESC_CLEAR       = "\x1b[K"
-LABEL_PAD       = "       "        # column alignment
+LABEL_PAD       = "       "        # 7 spaces
 
-# ────────────────  Pretty helpers  ────────────────
+# ─────────── Pretty helpers ───────────
 def fmt_size(b: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
-        if b < 1024 or unit == "PB":
-            return f"{b/1024 if unit!='B' else b:.1f} {unit}"
+    for u in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if b < 1024 or u == "PB":
+            return f"{b/1024 if u!='B' else b:.1f} {u}"
         b /= 1024
 
 def fmt_secs(s: float) -> str:
@@ -115,29 +106,19 @@ def fsync_path(p: Path):
     finally:
         os.close(fd)
 
-def fmt_actions(state: str, spinner: str) -> str:
+def fmt_actions(state: str, spin: str) -> str:
     parts: list[str] = []
     for phase in ("Copying", "Hashing", "Renaming"):
         if state == phase.lower():
-            parts.append(f"{phase} {spinner}")
-        elif (phase == "Copying" and state in ("hashing", "renaming", "done")) or \
-             (phase == "Hashing" and state in ("renaming", "done")) or \
-             (phase == "Renaming" and state == "done"):
-            parts.append(f"{phase} DONE")
+            parts.append(f"{phase} {spin}")
+        elif (phase == "Copying"  and state in ("hashing", "renaming", "done")) or \
+             (phase == "Hashing"  and state in ("renaming", "done"))          or \
+             (phase == "Renaming" and state == "done"): parts.append(f"{phase} DONE")
         else:
             parts.append(phase)
     return "Actions:" + LABEL_PAD + "  –  ".join(parts)
 
-def _prune_empty_dirs(start: Path, stop: Path):
-    p = start
-    while p != stop and p != p.parent:
-        try:
-            p.rmdir()
-        except OSError:
-            break
-        p = p.parent
-
-# ────────────────  Journal  ────────────────
+# ─────────── Journal ───────────
 class Journal:
     def __init__(self, db: Path):
         self.conn = sqlite3.connect(db)
@@ -164,10 +145,9 @@ class Journal:
             Path(r[0])
             for r in self.conn.execute("SELECT src FROM progress WHERE done=1")
         }
-        for p in root.rglob("*"):
+        for p in root.rglob("*"):          # safe now (no dir deletions inside loop)
             if p.is_file() and p not in done:
                 yield p
-
     def close(self):
         self.conn.close()
 
@@ -190,14 +170,13 @@ def copy_one(
     bar: tqdm,
     act: tqdm,
     idx: int,
-    total_files: int,
+    total: int,
+    to_prune: set[Path]
 ):
-    overall_start = monotonic()
+    t0 = monotonic()
 
     rel = src.relative_to(src_root)
-# path within src_root
     dst = dst_root / rel
-# full destination file path
     if dst.exists() and not verify(src, dst):
         dst = unique_path(dst)
 
@@ -214,7 +193,7 @@ def copy_one(
         tmp.unlink()
         done = 0
 
-    # ── live block prep ───────────────────────────────────────────
+    # live block
     print_desc(
         info,
         "Current file:" + LABEL_PAD +
@@ -264,44 +243,36 @@ def copy_one(
     src.unlink()
     journal.mark(src, dst, 1)
 
-    # ── tidy empty directories under src_root ─────────────────────
-    _prune_empty_dirs(src.parent, src_root)
+    # remember dirs for *later* pruning
+    d = src.parent
+    while d != src_root and d != d.parent:
+        to_prune.add(d)
+        d = d.parent
 
     print_desc(act, fmt_actions("done", ""))
-    bar.refresh()           # force final 100 %
-
-    duration = monotonic() - overall_start
+    bar.refresh()
     tqdm.write(
-        f"INFO: OK {idx}/{total_files}  "
+        f"INFO: OK {idx}/{total}  "
         f"Size: {fmt_size(size)}  "
-        f"Time: {fmt_secs(duration)}  "
+        f"Time: {fmt_secs(monotonic()-t0)}  "
         f"FILE: {dst.name}"
     )
 
 # ────────────────  Driver  ────────────────
 def drive(src_root: Path, dst_root: Path):
-    """
-    Ensures that the *leaf* folder of src_root is recreated under dst_root.
-
-        src_root  = /example/X
-        dst_root  = /target
-        effective destination root = /target/X
-    """
-    # build /target/X
-    dst_root_final = dst_root / src_root.name
+    dst_root_final = dst_root / src_root.name   # keep leaf folder
     dst_root_final.mkdir(parents=True, exist_ok=True)
 
     journal = Journal(Path(DB))
-    total_files = sum(1 for p in src_root.rglob("*") if p.is_file())
+    total = sum(1 for p in src_root.rglob("*") if p.is_file())
 
     files_bar = tqdm(
-        total=total_files,
+        total=total,
         bar_format="Files  {n_fmt}/{total_fmt} |{bar}| {percentage:3.0f} %",
         ncols=BAR_NCOLS,
         position=0,
         leave=True,
     )
-
     info_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=1, leave=True)
     prog_bar = tqdm(
         total=1,
@@ -317,6 +288,8 @@ def drive(src_root: Path, dst_root: Path):
     )
     act_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=3, leave=True)
 
+    dirs_to_prune: set[Path] = set()
+
     for src in journal.pending(src_root):
         if _stop:
             break
@@ -329,20 +302,25 @@ def drive(src_root: Path, dst_root: Path):
             prog_bar,
             act_bar,
             idx=files_bar.n + 1,
-            total_files=total_files,
+            total=total,
+            to_prune=dirs_to_prune,
         )
         files_bar.update(1)
 
-    # try to remove now-empty src_root
+    # ── remove collected empty dirs (deepest first) ──
+    for d in sorted(dirs_to_prune, key=lambda p: len(p.parts), reverse=True):
+        try: 
+            d.rmdir()
+        except OSError: 
+            pass
+
     try:
         src_root.rmdir()
     except OSError:
         pass
 
-    files_bar.close()
-    info_bar.close()
-    prog_bar.close()
-    act_bar.close()
+    # close bars & journal
+    for b in (files_bar, info_bar, prog_bar, act_bar): b.close()
     journal.close()
     log.info("Session finished – re-run to resume.")
 
