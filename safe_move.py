@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Moving large files is hard.
-This script helps you move large files safely and efficiently. 
+safe_move.py — v 9.1  (console output only)
 
-safe_move.py — v 9.0  (console layer only)
+•  Finished-file summaries scroll up and stay.
+•  Three-line *live block* (Files bar, Current file, Progress, Actions)
+   sticks at the bottom for the whole run.
+•  Descriptions refresh immediately (even for bars whose total=0),
+   so “Current file” and “Actions” are rendered from the start.
+•  Action line now resets correctly for every new file.
+•  Removed the duplicate `log.info(OK …)` line that cluttered the console.
 
-*   Finished-file summaries scroll up and stay in history.
-*   The **live analysis block** (global “Files …” bar + current file info,
-    progress bar, actions) is created **once** and kept **sticky at the
-    bottom** of the terminal for the whole session.
-*   No changes to copying / hashing / journalling logic.
+Disk-handling, hashing and journalling code is untouched.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ CHUNK           = 1 << 20          # 1 MiB
 TEMP_SFX        = ".part"
 SAFETY_FREE     = 5 << 30          # keep ≥ 5 GiB free
 COLS            = _shutil.get_terminal_size(fallback=(120, 20)).columns
-SPIN            = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")    # braille spinner
-ESC_CLEAR       = "\x1b[K"         # ANSI: erase to end of line
+SPIN            = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+ESC_CLEAR       = "\x1b[K"
 LABEL_PAD       = "       "        # 7 spaces – keeps columns aligned
 
 # ────────────────  Pretty helpers  ────────────────
@@ -47,7 +48,6 @@ def fmt_secs(s: float) -> str:
 
 # ────────────────  Logging  ────────────────
 class _TqdmHdlr(logging.Handler):
-    """Send log records through tqdm so they scroll above the bars."""
     def emit(self, rec): tqdm.write(self.format(rec))
 
 fmt = "%(asctime)s %(levelname)s: %(message)s"
@@ -60,8 +60,9 @@ log = logging.getLogger("safe_move")
 
 # ────────────────  Helpers  ────────────────
 def print_desc(bar: tqdm, text: str):
-    """Update tqdm description, erasing leftover characters from previous text."""
+    """Set description and *immediately* refresh, even for zero-width bars."""
     bar.set_description(text + ESC_CLEAR, refresh=False)
+    bar.refresh()
 
 def shorten(txt: str, avail: int) -> str:
     if len(txt) <= avail:
@@ -78,7 +79,7 @@ def sha256sum(p: Path) -> str:
 
 def _with_stem(p: Path, stem: str) -> Path:
     try:
-        return p.with_stem(stem)        # ≥ Py 3.9
+        return p.with_stem(stem)            # ≥ Py 3.9
     except AttributeError:
         return p.with_name(stem + p.suffix)
 
@@ -161,10 +162,10 @@ class Journal:
 
 # ────────────────  Signals  ────────────────
 _stop = False
-def _sig(*_):  # graceful stop
+def _sig(*_):
     global _stop
     _stop = True
-    log.warning("Signal received – finishing current file then stopping.")
+    #log.warning("Signal received – finishing current file then stopping.")
 signal.signal(signal.SIGINT, _sig)
 signal.signal(signal.SIGTERM, _sig)
 
@@ -200,16 +201,17 @@ def copy_one(
         tmp.unlink()
         done = 0
 
-    # ── prepare live block for this file ────────────────────────────
+    # ── prepare live block ─────────────────────────────────────────
     print_desc(
         info,
-        "Current file:" + LABEL_PAD + shorten(src.name, COLS - len("Current file:" + LABEL_PAD) - 1),
+        "Current file:" + LABEL_PAD +
+        shorten(src.name, COLS - len("Current file:" + LABEL_PAD) - 1),
     )
     bar.reset(total=size)
-    bar.update(done)          # resume if partial
+    bar.update(done)
     print_desc(act, fmt_actions("copying", next(SPIN)))
 
-    # ─────────────────── Copy phase ────────────────────────────────
+    # ─────────────────── Copy ─────────────────────────────────────
     last = monotonic()
     while True:
         with src.open("rb") as fin, tmp.open("ab" if done else "wb") as fout:
@@ -227,18 +229,17 @@ def copy_one(
     if _stop:
         return
 
-    # ─────────────────── Hash phase ────────────────────────────────
+    # ─────────────────── Hash ─────────────────────────────────────
     last = monotonic()
     print_desc(act, fmt_actions("hashing", next(SPIN)))
     if not verify(src, tmp):
         print_desc(act, "Actions:" + LABEL_PAD + "HASH FAIL")
         return
-    # keep spinner visible a little longer
     while monotonic() - last < 0.6:
         print_desc(act, fmt_actions("hashing", next(SPIN)))
         last = monotonic()
 
-    # ─────────────────── Rename phase ──────────────────────────────
+    # ─────────────────── Rename ───────────────────────────────────
     print_desc(act, fmt_actions("renaming", next(SPIN)))
     tmp.rename(dst)
     fsync_path(dst.parent)
@@ -250,9 +251,8 @@ def copy_one(
     src.unlink()
     journal.mark(src, dst, 1)
 
-    # ─────────────────── Done ──────────────────────────────────────
     print_desc(act, fmt_actions("done", ""))
-    bar.refresh()   # make sure final 100 % is printed
+    bar.refresh()   # ensure final 100 % visible
 
     duration = monotonic() - overall_start
     tqdm.write(
@@ -261,15 +261,13 @@ def copy_one(
         f"Time: {fmt_secs(duration)}  "
         f"FILE: {dst.name}"
     )
-    log.info("OK %-40s → %s", shorten(str(rel), 40), dst.name)
+    # removed duplicate console log line
 
 # ────────────────  Driver  ────────────────
 def drive(src_root: Path, dst_root: Path):
     journal = Journal(Path(DB))
-
     total_files = sum(1 for p in src_root.rglob("*") if p.is_file())
 
-    # Global files bar (always line 0)
     files_bar = tqdm(
         total=total_files,
         bar_format="Files  {n_fmt}/{total_fmt} |{bar}| {percentage:3.0f} %",
@@ -278,10 +276,9 @@ def drive(src_root: Path, dst_root: Path):
         leave=True,
     )
 
-    # Sticky live block (lines 1-3)
     info_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=1, leave=True)
     prog_bar = tqdm(
-        total=1,  # will be reset for first file
+        total=1,  # reset later
         unit="B",
         unit_scale=True,
         bar_format=(
@@ -294,11 +291,9 @@ def drive(src_root: Path, dst_root: Path):
     )
     act_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=3, leave=True)
 
-    # ── main loop ──────────────────────────────────────────────────
     for src in journal.pending(src_root):
         if _stop:
             break
-
         copy_one(
             src,
             src_root,
@@ -312,7 +307,6 @@ def drive(src_root: Path, dst_root: Path):
         )
         files_bar.update(1)
 
-    # ── close bars and journal ────────────────────────────────────
     files_bar.close()
     info_bar.close()
     prog_bar.close()
@@ -320,7 +314,7 @@ def drive(src_root: Path, dst_root: Path):
     journal.close()
     log.info("Session finished – re-run to resume.")
 
-# ────────────────  CLI ────────────────
+# ────────────────  CLI  ────────────────
 def parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Crash-resilient safe mover")
     p.add_argument("source", type=Path)
