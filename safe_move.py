@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-safe_move.py — v 9.3  (console layer + tidy-up)
+safe_move.py — v 9.4  (console + directory-layout tweak)
 
-What’s new in this revision
-────────────────────────────
-• **Empties every directory tree** under the source once all its files have
-  been moved:
-    – After each file is deleted, we try to remove its parent directories
-      bottom-up until we hit the `src_root` or a non-empty dir.
-    – At the very end we also attempt to remove `src_root` itself if it
-      ended up empty.
-• The deletion is **safe**:
-    – Only `os.rmdir()` (fails unless directory is empty).
-    – Never walks above the original `src_root`.
-• All file-moving, hashing, journalling, progress-bar logic is unchanged
-  from v 9.2 (fixed-width bars, sticky live block, etc.).
+What's new
+──────────
+* **Root-folder preserved**: when you run
+
+      safe_move.py /example/X  /target
+
+  every file that was under */example/X* is now copied to */target/X/* …  
+  (The *X* directory is created automatically if it doesn't exist.)
+* No other behaviour changes.  Copy / hash / journalling / progress bars all
+  work exactly as in v 9.3.
 """
 
 from __future__ import annotations
@@ -31,16 +28,16 @@ except ImportError:
 
 # ────────────────  Config  ────────────────
 DB, LOGFILE     = "copy_progress.db", "safe_move.log"
-CHUNK           = 1 << 20          # 1 MiB
+CHUNK           = 1 << 20
 TEMP_SFX        = ".part"
-SAFETY_FREE     = 5 << 30          # keep ≥ 5 GiB free
+SAFETY_FREE     = 5 << 30          # ≥ 5 GiB free
 
 COLS            = _shutil.get_terminal_size(fallback=(120, 20)).columns
-BAR_NCOLS       = min(100, COLS)   # fixed bar width, never wider than terminal
+BAR_NCOLS       = min(100, COLS)   # fixed bar width
 
 SPIN            = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 ESC_CLEAR       = "\x1b[K"
-LABEL_PAD       = "       "        # 7 spaces – keeps columns aligned
+LABEL_PAD       = "       "        # column alignment
 
 # ────────────────  Pretty helpers  ────────────────
 def fmt_size(b: int) -> str:
@@ -57,15 +54,14 @@ def fmt_secs(s: float) -> str:
 class _TqdmHdlr(logging.Handler):
     def emit(self, rec): tqdm.write(self.format(rec))
 
-fmt = "%(asctime)s %(levelname)s: %(message)s"
 logging.basicConfig(
     level=logging.INFO,
     handlers=[_TqdmHdlr(), logging.FileHandler(LOGFILE, encoding="utf-8")],
-    format=fmt,
+    format="%(asctime)s %(levelname)s: %(message)s",
 )
 log = logging.getLogger("safe_move")
 
-# ────────────────  Helpers  ────────────────
+# ────────────────  Misc helpers  ────────────────
 def print_desc(bar: tqdm, text: str):
     bar.set_description(text + ESC_CLEAR, refresh=False)
     bar.refresh()
@@ -85,7 +81,7 @@ def sha256sum(p: Path) -> str:
 
 def _with_stem(p: Path, stem: str) -> Path:
     try:
-        return p.with_stem(stem)        # ≥ Py 3.9
+        return p.with_stem(stem)
     except AttributeError:
         return p.with_name(stem + p.suffix)
 
@@ -94,9 +90,9 @@ def unique_path(p: Path) -> Path:
         return p
     i = 1
     while True:
-        c = _with_stem(p, f"{p.stem}_{i}")
-        if not c.exists():
-            return c
+        cand = _with_stem(p, f"{p.stem}_{i}")
+        if not cand.exists():
+            return cand
         i += 1
 
 def enough_space(dir_: Path, need: int) -> bool:
@@ -133,16 +129,12 @@ def fmt_actions(state: str, spinner: str) -> str:
     return "Actions:" + LABEL_PAD + "  –  ".join(parts)
 
 def _prune_empty_dirs(start: Path, stop: Path):
-    """
-    Remove empty dirs from *start* up to (but NOT including) *stop*.
-    Stops on first non-empty dir or at filesystem root.
-    """
     p = start
     while p != stop and p != p.parent:
         try:
-            p.rmdir()          # succeeds only if directory is empty
+            p.rmdir()
         except OSError:
-            break              # not empty or other error – stop pruning
+            break
         p = p.parent
 
 # ────────────────  Journal  ────────────────
@@ -203,7 +195,9 @@ def copy_one(
     overall_start = monotonic()
 
     rel = src.relative_to(src_root)
+# path within src_root
     dst = dst_root / rel
+# full destination file path
     if dst.exists() and not verify(src, dst):
         dst = unique_path(dst)
 
@@ -220,7 +214,7 @@ def copy_one(
         tmp.unlink()
         done = 0
 
-    # ── prepare live block ─────────────────────────────────────────
+    # ── live block prep ───────────────────────────────────────────
     print_desc(
         info,
         "Current file:" + LABEL_PAD +
@@ -286,6 +280,17 @@ def copy_one(
 
 # ────────────────  Driver  ────────────────
 def drive(src_root: Path, dst_root: Path):
+    """
+    Ensures that the *leaf* folder of src_root is recreated under dst_root.
+
+        src_root  = /example/X
+        dst_root  = /target
+        effective destination root = /target/X
+    """
+    # build /target/X
+    dst_root_final = dst_root / src_root.name
+    dst_root_final.mkdir(parents=True, exist_ok=True)
+
     journal = Journal(Path(DB))
     total_files = sum(1 for p in src_root.rglob("*") if p.is_file())
 
@@ -299,7 +304,7 @@ def drive(src_root: Path, dst_root: Path):
 
     info_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=1, leave=True)
     prog_bar = tqdm(
-        total=1,  # reset later
+        total=1,
         unit="B",
         unit_scale=True,
         bar_format=(
@@ -318,7 +323,7 @@ def drive(src_root: Path, dst_root: Path):
         copy_one(
             src,
             src_root,
-            dst_root,
+            dst_root_final,
             journal,
             info_bar,
             prog_bar,
@@ -328,7 +333,7 @@ def drive(src_root: Path, dst_root: Path):
         )
         files_bar.update(1)
 
-    # attempt to remove src_root itself if empty
+    # try to remove now-empty src_root
     try:
         src_root.rmdir()
     except OSError:
