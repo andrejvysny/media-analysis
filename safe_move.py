@@ -259,8 +259,8 @@ def copy_one(
     )
 
 # ────────────────  Driver  ────────────────
-def drive(src_root: Path, dst_root: Path):
-    dst_root_final = dst_root / src_root.name   # keep leaf folder
+def drive(src_root: Path, dst_root: Path, no_source_dir: bool = True):
+    dst_root_final = dst_root if no_source_dir else dst_root / src_root.name
     dst_root_final.mkdir(parents=True, exist_ok=True)
 
     journal = Journal(Path(DB))
@@ -329,10 +329,12 @@ def parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Crash-resilient safe mover")
     p.add_argument("source", type=Path)
     p.add_argument("destination", type=Path)
+    p.add_argument("-s", "--source-dir", action="store_false", dest="with_source_dir",
+                  help="Move contents with source directory in destination. /path/to/source/X/ -> /path/to/destination/X/")
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse()
     if not args.source.is_dir():
         sys.exit(f"Source is not a directory: {args.source}")
-    drive(args.source.resolve(), args.destination.resolve())
+    drive(args.source.resolve(), args.destination.resolve(), args.with_source_dir)
