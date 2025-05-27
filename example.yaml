@@ -1,0 +1,7 @@
+root: /tmp/bestvideo_videos  # Changed to avoid potential conflicts with existing /tmp/videos
+db: /tmp/bestvideo.db
+modules:
+  - name: bestvideo.modules.scan_demo.ScanDemo
+    params: {}
+  - name: bestvideo.modules.meta_demo.MetaDemo
+    params: {} 
