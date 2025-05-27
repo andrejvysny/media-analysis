@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Moving large files is hard.
-This script helps you move large files safely and efficiently.
+This script helps you move large files safely and efficiently. 
 
 safe_move.py — v 9.0  (console layer only)
 
