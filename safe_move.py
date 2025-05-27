@@ -2,7 +2,7 @@
 """
 safe_move.py — v 9.5
 
-•   Keeps the source’s leaf folder (*X*) under the target.
+•   Keeps the source's leaf folder (*X*) under the target.
 •   Deletes only those directories that are empty **after** all files are
     processed – avoids FileNotFoundError during os.walk / rglob.
 """
@@ -266,14 +266,17 @@ def drive(src_root: Path, dst_root: Path, no_source_dir: bool = True):
     journal = Journal(Path(DB))
     total = sum(1 for p in src_root.rglob("*") if p.is_file())
 
+    # Initialize progress bars with separator
+    separator = tqdm(total=0, bar_format="─" * COLS, position=0, leave=True)
+    separator.refresh()
     files_bar = tqdm(
         total=total,
         bar_format="Files  {n_fmt}/{total_fmt} |{bar}| {percentage:3.0f} %",
         ncols=BAR_NCOLS,
-        position=0,
+        position=1,
         leave=True,
     )
-    info_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=1, leave=True)
+    info_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=2, leave=True)
     prog_bar = tqdm(
         total=1,
         unit="B",
@@ -283,10 +286,10 @@ def drive(src_root: Path, dst_root: Path, no_source_dir: bool = True):
             "|{bar}| {percentage:3.0f} %  {n_fmt}/{total_fmt}  {rate_fmt}"
         ),
         ncols=BAR_NCOLS,
-        position=2,
+        position=3,
         leave=True,
     )
-    act_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=3, leave=True)
+    act_bar = tqdm(total=0, bar_format="{desc}", ncols=COLS, position=4, leave=True)
 
     dirs_to_prune: set[Path] = set()
 
