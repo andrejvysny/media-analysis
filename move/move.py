@@ -229,7 +229,6 @@ def copy_one(
         return
     while monotonic() - last < 0.6:
         print_desc(act, fmt_actions("hashing", next(SPIN)))
-        last = monotonic()
 
     # ─────────────────── Rename ───────────────────────────────────
     print_desc(act, fmt_actions("renaming", next(SPIN)))
